@@ -2365,20 +2365,7 @@ class MusicService :
     ) {
         if (totalCount == 0) return
 
-        val played = playedIndices.filter { it in 0 until totalCount && it != currentIndex }
-        val playedSet = played.toSet()
-        val remaining = (0 until totalCount)
-            .filter { it != currentIndex && it !in playedSet }
-            .toMutableList()
-        remaining.shuffle()
-
-        val order = IntArray(totalCount)
-        var pos = 0
-        played.forEach { order[pos++] = it }
-        order[pos++] = currentIndex
-        remaining.forEach { order[pos++] = it }
-
-        player.setShuffleOrder(DefaultShuffleOrder(order, System.currentTimeMillis()))
+        player.setShuffleOrder(DefaultShuffleOrder(shuffleOrderKeepingHistory(playedIndices, currentIndex, totalCount), System.currentTimeMillis()))
     }
 
     fun toggleLibrary() {
@@ -2842,9 +2829,9 @@ class MusicService :
                             .filterVideoSongs(cachedHideVideoSongs)
                     }
                 if (player.playbackState != STATE_IDLE && mediaItems.isNotEmpty()) {
-                    player.addMediaItems(mediaItems)
+                    val playedBefore = if (player.shuffleModeEnabled) playedShuffleIndices(player.currentMediaItemIndex) else emptyList(); player.addMediaItems(mediaItems)
                     if (player.shuffleModeEnabled) {
-                        applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, cachedShufflePlaylistFirst)
+                        applyShuffleOrderKeepingHistory(playedBefore, player.currentMediaItemIndex, player.mediaItemCount)
                     }
                 }
             }
