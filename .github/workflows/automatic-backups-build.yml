@@ -18,6 +18,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - name: Generate temporary build key
+        run: |
+          keytool -genkeypair -keystore "$RUNNER_TEMP/meld-debug.keystore" -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 30 -dname "CN=Meld CI"
+          echo "METROLIST_DEBUG_KEYSTORE_PATH=$RUNNER_TEMP/meld-debug.keystore" >> "$GITHUB_ENV"
       - name: Build APK
         run: ./gradlew --console=plain :app:assembleFossDebug
         env:
