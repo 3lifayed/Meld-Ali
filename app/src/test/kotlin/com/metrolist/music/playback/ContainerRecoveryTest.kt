@@ -2,6 +2,8 @@ package com.metrolist.music.playback
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
+import androidx.media3.exoplayer.source.UnrecognizedInputFormatException
 import java.io.EOFException
 import androidx.media3.common.PlaybackException
 import androidx.media3.datasource.DataSpec
@@ -88,6 +90,27 @@ class ContainerRecoveryTest {
             PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
         )
         assertFalse(shouldRecoverContainerFailure(networkError, fromSavedAudio = true))
+    }
+
+    @Test fun recoversSavedAudioWhenEveryExtractorRejectsTheHeader() {
+        val cause = UnrecognizedInputFormatException(
+            "None of the available extractors could read the stream.",
+            Uri.parse("https://example.invalid/audio"),
+            emptyList(),
+        ).apply {
+            stackTrace = arrayOf(StackTraceElement(
+                "androidx.media3.exoplayer.source.BundledExtractorsAdapter",
+                "init", "BundledExtractorsAdapter.java", 110,
+            ))
+        }
+        val failure = PlaybackException(
+            "Source error", java.io.IOException("Source failure", cause),
+            PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+        )
+        assertFalse(isMp4ContainerFailure(failure))
+        assertFalse(isMalformedContainerError(failure))
+        assertTrue(shouldRecoverContainerFailure(failure, fromSavedAudio = true))
+        assertFalse(shouldRecoverContainerFailure(failure, fromSavedAudio = false))
     }
 
     @Test fun remembersTheFailedDownloadAcrossSessionsAndAcceptsAReplacement() {

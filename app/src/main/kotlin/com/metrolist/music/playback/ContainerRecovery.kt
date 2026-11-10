@@ -2,6 +2,7 @@ package com.metrolist.music.playback
 
 import android.content.SharedPreferences
 import androidx.media3.common.PlaybackException
+import androidx.media3.exoplayer.source.UnrecognizedInputFormatException
 import java.io.EOFException
 
 internal fun isMp4ContainerFailure(error: PlaybackException): Boolean {
@@ -18,7 +19,11 @@ internal fun isMp4ContainerFailure(error: PlaybackException): Boolean {
 }
 
 internal fun shouldRecoverContainerFailure(error: PlaybackException, fromSavedAudio: Boolean): Boolean =
-    isMp4ContainerFailure(error) || (fromSavedAudio && isMalformedContainerError(error))
+    isMp4ContainerFailure(error) || (fromSavedAudio && (
+        isMalformedContainerError(error) ||
+            generateSequence<Throwable>(error) { it.cause }.take(8)
+                .any { it is UnrecognizedInputFormatException }
+    ))
 
 internal fun isMalformedContainerError(error: PlaybackException): Boolean {
     var cause: Throwable? = error
