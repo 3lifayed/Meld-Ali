@@ -23,6 +23,7 @@ coroutinesGuava = "1.11.0"
 activity = "1.13.0"
 hiltNavigation = "1.4.0"
 datastore = "1.2.1"
+workManager = "2.10.5"
 composeReorderable = "3.1.0"
 shimmer = "1.5.0"
 palette = "1.0.0"
@@ -36,6 +37,7 @@ tinypinyin = "2.0.3"
 protobuf = "4.36.0"
 
 [libraries]
+work-runtime = { module = "androidx.work:work-runtime-ktx", version.ref = "workManager" }
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
 coroutines-guava = { module = "org.jetbrains.kotlinx:kotlinx-coroutines-guava", version.ref = "coroutinesGuava" }
 

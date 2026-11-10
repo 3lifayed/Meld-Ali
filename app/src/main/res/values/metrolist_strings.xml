@@ -1203,4 +1203,17 @@
         <item quantity="other">%d files</item>
     </plurals>
     <string name="discord_information_warning">Meld uses Discord\'s public OAuth2 and Gateway APIs to share what you\'re listening to. Authorization happens through a local browser session that closes itself after capturing the code — nothing is sent to third-party servers. Your token is stored on this device in encrypted preferences and is never shared. Meld connects directly to wss://gateway.discord.gg to publish your activity, and only requests the minimum scope required (sdk.social_layer_presence).</string>
+    <string name="automatic_backup">Automatic backups</string>
+    <string name="automatic_backup_description">Create backups in the selected folder. Scheduled cloud backups use an unmetered connection.</string>
+    <string name="automatic_backup_location">Backup location</string>
+    <string name="automatic_backup_choose_folder">Choose a writable folder</string>
+    <string name="automatic_backup_folder_unavailable">Meld cannot keep write access to this folder. Choose another folder.</string>
+    <string name="automatic_backup_frequency">Backup frequency</string>
+    <string name="automatic_backup_daily">Daily</string>
+    <string name="automatic_backup_every_three_days">Every 3 days</string>
+    <string name="automatic_backup_weekly">Weekly</string>
+    <string name="automatic_backup_now">Back up now</string>
+    <string name="automatic_backup_no_success">No automatic backup created yet</string>
+    <string name="automatic_backup_last_success">Last successful write: %1$s</string>
+    <string name="automatic_backup_failed">The last backup failed. Check the folder and try again. %1$s</string>
 </resources>

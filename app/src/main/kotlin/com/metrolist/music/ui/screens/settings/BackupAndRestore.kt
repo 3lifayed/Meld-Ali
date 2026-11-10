@@ -215,6 +215,7 @@ fun BackupAndRestore(
                     ),
                 ),
         )
+        AutomaticBackupSettings()
     }
 
     TopAppBar(
