@@ -1601,6 +1601,9 @@ interface DatabaseDao {
     @Query("SELECT * FROM event ORDER BY rowId DESC")
     fun events(): Flow<List<EventWithSong>>
 
+    @Query("SELECT songId FROM event GROUP BY songId ORDER BY MAX(id) DESC LIMIT 50")
+    fun recentShuffleSongIds(): Flow<List<String>>
+
     @Transaction
     @Query("SELECT * FROM event ORDER BY rowId ASC LIMIT 1")
     fun firstEvent(): Flow<EventWithSong?>

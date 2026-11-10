@@ -13,7 +13,6 @@ import androidx.media3.database.DatabaseProvider
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.ResolvingDataSource
 import androidx.media3.datasource.cache.Cache
-import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.offline.Download
 import androidx.media3.exoplayer.offline.DownloadManager
@@ -93,22 +92,10 @@ constructor(
 
     val downloads = MutableStateFlow<Map<String, Download>>(emptyMap())
 
+    // Playback spans can belong to another encoding of the same song.
     private val dataSourceFactory =
-        ResolvingDataSource.Factory(
-            CacheDataSource
-                .Factory()
-                .setCache(playerCache)
-                .setCacheWriteDataSinkFactory(null)
-                .setUpstreamDataSourceFactory(
-                    OkHttpDataSource.Factory(streamHttpClient),
-                ),
-        ) { dataSpec ->
+        ResolvingDataSource.Factory(OkHttpDataSource.Factory(streamHttpClient)) { dataSpec ->
             val mediaId = dataSpec.key ?: error("No media id")
-            val length = if (dataSpec.length >= 0) dataSpec.length else 1
-
-            if (playerCache.isCached(mediaId, dataSpec.position, length)) {
-                return@Factory dataSpec
-            }
 
             songUrlCache[mediaId]?.let { cachedStream ->
                 return@Factory dataSpec.withResolvedStream(cachedStream)

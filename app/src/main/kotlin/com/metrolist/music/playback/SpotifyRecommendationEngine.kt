@@ -219,6 +219,7 @@ object SpotifyRecommendationEngine {
         limit: Int = 50,
         context: Context? = null,
         database: MusicDatabase? = null,
+        excludedTrackIds: Set<String> = emptySet(),
     ): List<SpotifyTrack> = withContext(Dispatchers.IO) {
         if (!ensureProfileLoaded(context, database)) {
             Timber.w("$TAG: Profile not available, falling back to basic queue")
@@ -226,7 +227,7 @@ object SpotifyRecommendationEngine {
         }
 
         val candidates = mutableListOf<ScoredCandidate>()
-        val seenIds = mutableSetOf(seedTrack.id)
+        val seenIds = (excludedTrackIds + seedTrack.id).toMutableSet()
         val seedArtistIds = seedTrack.artists.mapNotNull { it.id }.toSet()
         val seedGenres = seedArtistIds.flatMap { artistGenreMap[it].orEmpty() }.toSet()
 

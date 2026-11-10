@@ -768,7 +768,7 @@ constructor(
                 mediaItems.firstOrNull()?.mediaId?.split("/")
             } ?: return@future defaultResult
 
-            when (path.firstOrNull()) {
+            val result = when (path.firstOrNull()) {
                 MusicService.SONG -> {
                     val songId = path.getOrNull(1) ?: return@future defaultResult
                     val allSongs = database.songsByCreateDateAsc().first()
@@ -894,8 +894,12 @@ constructor(
                         if (exactLocalPlaylist != null) {
                             val playlistSongs = database.playlistSongs(exactLocalPlaylist.playlist.id).first()
                             if (playlistSongs.isNotEmpty()) {
+                                val items = playlistSongs.map { it.song.toMediaItem() }
+                                withContext(Dispatchers.Main) {
+                                    service.adoptQueue(ListQueue(items = items), initialQueueSize = items.size)
+                                }
                                 return@future MediaItemsWithStartPosition(
-                                    playlistSongs.map { it.song.toMediaItem() },
+                                    items,
                                     0,
                                     C.TIME_UNSET
                                 )
@@ -999,6 +1003,16 @@ constructor(
 
                 else -> defaultResult
             }
+            if (path.firstOrNull() != MusicService.SEARCH && result.mediaItems.isNotEmpty()) {
+                withContext(Dispatchers.Main) {
+                    service.adoptQueue(
+                        ListQueue(items = result.mediaItems),
+                        initialQueueSize = result.mediaItems.size,
+                        shuffle = if (path.lastOrNull() == MusicService.SHUFFLE_ACTION) true else null,
+                    )
+                }
+            }
+            result
         }
 
     private fun drawableUri(

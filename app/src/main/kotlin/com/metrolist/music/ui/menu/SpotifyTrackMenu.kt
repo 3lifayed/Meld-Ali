@@ -5,7 +5,10 @@
 
 package com.metrolist.music.ui.menu
 
+import android.content.ActivityNotFoundException
+import android.content.Intent
 import android.widget.Toast
+import androidx.core.net.toUri
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.lazy.items
@@ -215,7 +218,35 @@ fun SpotifyTrackMenu(
     Spacer(modifier = Modifier.height(12.dp))
 
     Material3MenuGroup(
-        items = listOf(
+        items = listOfNotNull(
+            track.id.takeIf { id -> id.length == 22 && id.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' } }
+                ?.let { spotifyId ->
+                    Material3MenuItemData(
+                        title = { Text(text = stringResource(R.string.open_track_in_spotify)) },
+                        icon = {
+                            Icon(painterResource(R.drawable.spotify), contentDescription = null)
+                        },
+                        onClick = {
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW, "spotify:track:$spotifyId".toUri())
+                                    .setPackage("com.spotify.music")
+                                context.startActivity(intent)
+                                onDismiss()
+                            } catch (_: ActivityNotFoundException) {
+                                try {
+                                    context.startActivity(
+                                        Intent(Intent.ACTION_VIEW, "https://open.spotify.com/track/$spotifyId".toUri()),
+                                    )
+                                    onDismiss()
+                                } catch (_: ActivityNotFoundException) {
+                                    Toast.makeText(
+                                        context, R.string.spotify_track_open_failed, Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
+                            }
+                        },
+                    )
+                },
             Material3MenuItemData(
                 title = { Text(text = stringResource(R.string.play_next)) },
                 description = { Text(text = stringResource(R.string.play_next_desc)) },

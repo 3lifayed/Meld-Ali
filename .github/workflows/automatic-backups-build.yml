@@ -19,11 +19,22 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Build APK
-        run: ./gradlew --console=plain :app:assembleGmsRelease
+        run: ./gradlew --console=plain :app:assembleFossDebug
         env:
+          METROLIST_APPLICATION_ID: app.alifayed.meld
           METROLIST_APP_NAME: Meld Ali
       - uses: actions/upload-artifact@v6
         with:
           name: automatic-backups-build
-          path: app/build/outputs/apk/gms/release/*-unsigned.apk
+          path: app/build/outputs/apk/foss/debug/*.apk
+          if-no-files-found: error
+      - name: Collect Android signing tools
+        run: |
+          tool=$(find "${ANDROID_HOME}/build-tools" -name apksigner.jar -print | sort -V | tail -1)
+          test -n "$tool"
+          cp "$tool" apksigner.jar
+      - uses: actions/upload-artifact@v6
+        with:
+          name: android-signing-tool
+          path: apksigner.jar
           if-no-files-found: error

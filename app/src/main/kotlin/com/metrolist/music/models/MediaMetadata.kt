@@ -36,7 +36,13 @@ data class MediaMetadata(
     val isEpisode: Boolean = false,
     val uploadEntityId: String? = null,
     val isrc: String? = null,
+    val spotifyTrackId: String? = null,
 ) : Serializable {
+    companion object {
+        // Keep queues saved before Spotify identity was added readable.
+        private const val serialVersionUID: Long = -4906488977917690175L
+    }
+
     val isVideoSong: Boolean
         get() = musicVideoType != null && musicVideoType != MUSIC_VIDEO_TYPE_ATV
 

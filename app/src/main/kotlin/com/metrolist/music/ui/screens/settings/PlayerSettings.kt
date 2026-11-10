@@ -63,6 +63,10 @@ import com.metrolist.music.constants.PreventDuplicateTracksInQueueKey
 import com.metrolist.music.constants.RememberShuffleAndRepeatKey
 import com.metrolist.music.constants.ResumeOnBluetoothConnectKey
 import com.metrolist.music.constants.SeekExtraSeconds
+import com.metrolist.music.constants.DiscoveryIntervalKey
+import com.metrolist.music.playback.DEFAULT_DISCOVERY_INTERVAL
+import com.metrolist.music.playback.MAX_DISCOVERY_INTERVAL
+import com.metrolist.music.playback.validDiscoveryInterval
 import com.metrolist.music.constants.ShufflePlaylistFirstKey
 import com.metrolist.music.constants.SimilarContent
 import com.metrolist.music.constants.SkipSilenceInstantKey
@@ -199,6 +203,13 @@ fun PlayerSettings(
         RememberShuffleAndRepeatKey,
         defaultValue = true
     )
+    val (discoveryInterval, onDiscoveryIntervalChange) = rememberPreference(
+        DiscoveryIntervalKey,
+        defaultValue = DEFAULT_DISCOVERY_INTERVAL,
+    )
+    var discoveryIntervalDraft by remember(discoveryInterval) {
+        mutableStateOf(validDiscoveryInterval(discoveryInterval).toFloat())
+    }
     val (shufflePlaylistFirst, onShufflePlaylistFirstChange) = rememberPreference(
         ShufflePlaylistFirstKey,
         defaultValue = false
@@ -916,6 +927,25 @@ fun PlayerSettings(
                         )
                     },
                     onClick = { similarContentEnabledChange(!similarContentEnabled) }
+                ),
+                Material3SettingsItem(
+                    icon = painterResource(R.drawable.shuffle),
+                    title = { Text(stringResource(R.string.discovery_frequency)) },
+                    description = {
+                        Column {
+                            val count = discoveryIntervalDraft.roundToInt()
+                            Text(pluralStringResource(R.plurals.discovery_frequency_summary, count, count))
+                            Slider(
+                                value = discoveryIntervalDraft,
+                                onValueChange = { discoveryIntervalDraft = it.roundToInt().toFloat() },
+                                onValueChangeFinished = {
+                                    onDiscoveryIntervalChange(validDiscoveryInterval(discoveryIntervalDraft.roundToInt()))
+                                },
+                                valueRange = 1f..MAX_DISCOVERY_INTERVAL.toFloat(),
+                                steps = MAX_DISCOVERY_INTERVAL - 2,
+                            )
+                        }
+                    },
                 ),
                 Material3SettingsItem(
                     icon = painterResource(R.drawable.shuffle),

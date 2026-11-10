@@ -1216,4 +1216,28 @@
     <string name="automatic_backup_no_success">No automatic backup created yet</string>
     <string name="automatic_backup_last_success">Last successful write: %1$s</string>
     <string name="automatic_backup_failed">The last backup failed. Check the folder and try again. %1$s</string>
+    <string name="shuffle_mode_title">Shuffle mode</string>
+    <string name="shuffle_disabled">Off</string>
+    <string name="shuffle_disabled_desc">Play in the original queue order.</string>
+    <string name="shuffle_random">Random</string>
+    <string name="shuffle_random_desc">Shuffle the queue at random.</string>
+    <string name="shuffle_better">Better Shuffle</string>
+    <string name="shuffle_better_desc">Only queue songs. Favor less recently played tracks and space out artists when possible.</string>
+    <string name="shuffle_discovery">Discovery</string>
+    <string name="shuffle_discovery_desc">Mix Spotify catalog recommendations between your songs. Adjust frequency in Player and audio settings. Requires Spotify sign-in and internet.</string>
+    <string name="shuffle_discovery_loading">Finding recommendations…</string>
+    <string name="shuffle_discovery_sign_in">Sign in to Spotify in Meld settings, then tap Retry. Your queue will keep playing.</string>
+    <string name="shuffle_discovery_seed_missing">Could not find the current song in Spotify. Try another song, then tap Retry.</string>
+    <string name="shuffle_discovery_fetch_failed">Could not load Spotify recommendations. Your queue will keep playing. Tap Retry to try again.</string>
+    <string name="shuffle_discovery_no_new">No new playable Spotify songs were found outside your queue. Try another song, then tap Retry.</string>
+    <string name="shuffle_discovery_timeout">Spotify Discovery took too long to respond. Your queue will keep playing. Tap Retry to try again.</string>
+    <string name="shuffle_discovery_unavailable">Spotify Discovery is unavailable. Check your Spotify sign-in and internet connection. Your songs will keep playing.</string>
+    <string name="shuffle_discovery_recommendation">Discovery recommendation</string>
+    <string name="discovery_frequency">Discovery frequency</string>
+    <plurals name="discovery_frequency_summary">
+        <item quantity="one">One recommendation after every %1$d queue song</item>
+        <item quantity="other">One recommendation after every %1$d queue songs</item>
+    </plurals>
+    <string name="open_track_in_spotify">Open in Spotify</string>
+    <string name="spotify_track_open_failed">Install Spotify or a web browser to open this track.</string>
 </resources>

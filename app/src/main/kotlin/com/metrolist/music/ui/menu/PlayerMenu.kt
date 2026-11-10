@@ -190,7 +190,9 @@ fun PlayerMenu(
         title = mediaMetadata.title,
         artist = mediaMetadata.artists.firstOrNull()?.name ?: "",
         durationSec = mediaMetadata.duration,
-        spotifyUri = resolvedSpotifyMatch?.spotifyId?.let { "spotify:track:$it" },
+        spotifyUri = (mediaMetadata.spotifyTrackId
+            ?: com.metrolist.music.playback.SpotifyMetadataRegistry.getSpotifyId(mediaMetadata.id)
+            ?: resolvedSpotifyMatch?.spotifyId)?.let { "spotify:track:$it" },
         mapper = spotifyMapper,
         onDismiss = { showAddToSpotifyPlaylist = false },
     )

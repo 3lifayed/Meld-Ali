@@ -16,11 +16,12 @@ internal data class CachedStreamUrl(
     val requireBoundedRange: Boolean = false,
     val rangeChunkSizeBytes: Long = 0L,
     val useRangeChunks: Boolean = false,
+    val cacheKey: String? = null,
 )
 
 internal fun DataSpec.withResolvedStream(stream: CachedStreamUrl): DataSpec {
     val resolved =
-        withUri(stream.url.toUri())
+        withUri(stream.url.toUri()).buildUpon().setKey(stream.cacheKey ?: key).build()
             .withRequestHeaders(httpRequestHeaders + stream.requestHeaders)
     if ((!stream.requireBoundedRange && !stream.useRangeChunks) || stream.rangeChunkSizeBytes <= 0L) {
         return resolved
@@ -81,6 +82,7 @@ internal class StreamUrlCache(
         requireBoundedRange: Boolean = false,
         rangeChunkSizeBytes: Long = 0L,
         useRangeChunks: Boolean = false,
+        cacheKey: String? = null,
         expectedGeneration: Long = generation(mediaId),
     ): Boolean {
         val now = currentTimeMillis()
@@ -101,6 +103,7 @@ internal class StreamUrlCache(
                             requireBoundedRange = requireBoundedRange,
                             rangeChunkSizeBytes = rangeChunkSizeBytes,
                             useRangeChunks = useRangeChunks,
+                            cacheKey = cacheKey,
                         ),
                     expiresAtMillis = expiresAtMillis,
                 )

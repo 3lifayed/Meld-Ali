@@ -67,7 +67,9 @@ fun MediaMetadata.withResolvedArtistNameAliases(): MediaMetadata {
 }
 
 fun MediaItem.withUpdatedMetadata(updatedMetadata: MediaMetadata): MediaItem {
-    val resolvedMetadata = updatedMetadata.withResolvedArtistNameAliases()
+    val resolvedMetadata = updatedMetadata.copy(
+        spotifyTrackId = updatedMetadata.spotifyTrackId ?: metadata?.spotifyTrackId,
+    ).withResolvedArtistNameAliases()
     val artistNames = resolvedMetadata.artists.joinToString { it.name }
     return buildUpon()
         .setTag(resolvedMetadata)

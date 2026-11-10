@@ -318,6 +318,7 @@ fun BottomSheetPlayer(
     val mediaMetadata by playerConnection.mediaMetadata.collectAsState()
     val currentSong by playerConnection.currentSong.collectAsStateWithLifecycle(initialValue = null)
     val automix by playerConnection.service.automixItems.collectAsStateWithLifecycle()
+    val discoveryIds by playerConnection.service.discoveryRecommendations.collectAsStateWithLifecycle()
     val repeatMode by playerConnection.repeatMode.collectAsStateWithLifecycle()
     val canSkipPrevious by playerConnection.canSkipPrevious.collectAsStateWithLifecycle()
     val canSkipNext by playerConnection.canSkipNext.collectAsStateWithLifecycle()
@@ -403,7 +404,10 @@ fun BottomSheetPlayer(
     // file even after the user disables "similar content". Gate the auto-append on
     // the live setting so toggling it off actually stops the queue from growing.
     val similarContentEnabled by rememberPreference(SimilarContent, defaultValue = true)
-    if (similarContentEnabled && !canSkipNext && automix.isNotEmpty()) {
+    val shuffleStyle by playerConnection.service.shuffleStyle.collectAsStateWithLifecycle()
+    val shuffleEnabled by playerConnection.shuffleModeEnabled.collectAsStateWithLifecycle()
+    val ownsRecommendations = shuffleEnabled && shuffleStyle != com.metrolist.music.playback.ShuffleStyle.RANDOM
+    if (similarContentEnabled && !ownsRecommendations && !canSkipNext && automix.isNotEmpty()) {
         playerConnection.service.addToQueueAutomix(automix[0], 0)
     } else if (!similarContentEnabled && automix.isNotEmpty()) {
         playerConnection.service.clearAutomix()
@@ -997,6 +1001,13 @@ fun BottomSheetPlayer(
                 Column(
                     modifier = Modifier.weight(1f),
                 ) {
+                    if (mediaMetadata.id in discoveryIds) {
+                        Text(
+                            text = "✦ " + stringResource(R.string.shuffle_discovery_recommendation),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextBackgroundColor,
+                        )
+                    }
                     AnimatedContent(
                         targetState = mediaMetadata.title,
                         transitionSpec = { fadeIn() togetherWith fadeOut() },

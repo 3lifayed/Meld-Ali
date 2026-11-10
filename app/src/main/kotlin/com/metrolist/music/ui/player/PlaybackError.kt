@@ -230,7 +230,7 @@ private fun buildPlaybackErrorReport(
     buildString {
         appendLine("Metrolist Playback Error Report")
         appendLine("================================")
-        appendLine("Time: ${Instant.ofEpochMilli(error.timestampMs)}")
+        appendLine("Time: ${Instant.now()}")
         appendLine("App version: ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})")
         appendLine("Architecture: ${BuildConfig.ARCHITECTURE}")
         appendLine("Android: ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")

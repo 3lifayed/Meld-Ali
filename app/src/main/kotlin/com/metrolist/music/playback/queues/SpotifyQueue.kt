@@ -13,6 +13,7 @@ import com.metrolist.music.playback.SpotifyRecommendationEngine
 import com.metrolist.music.playback.SpotifyYouTubeMapper
 import com.metrolist.spotify.Spotify
 import com.metrolist.spotify.models.SpotifyTrack
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -43,6 +44,8 @@ class SpotifyQueue(
     private val context: Context? = null,
     private val database: MusicDatabase? = null,
     override val preloadItem: MediaMetadata? = null,
+    private val spotifyCatalogOnly: Boolean = false,
+    private val excludedSpotifyIds: Set<String> = emptySet(),
 ) : Queue {
 
     companion object {
@@ -90,11 +93,12 @@ class SpotifyQueue(
         if (recommendationsGenerated) return
         recommendationsGenerated = true
         try {
-            val recommendations = withTimeoutOrNull(RECOMMENDATION_TIMEOUT_MS) {
+            val recommendations = withTimeoutOrNull(if (spotifyCatalogOnly) 15_000L else RECOMMENDATION_TIMEOUT_MS) {
                 SpotifyRecommendationEngine.getRecommendations(
                     seedTrack = initialTrack,
                     context = context,
                     database = database,
+                    excludedTrackIds = excludedSpotifyIds,
                 )
             }
 
@@ -112,6 +116,8 @@ class SpotifyQueue(
                 }
                 buildFallbackQueue()
             }
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             Timber.e(e, "SpotifyQueue: Engine failed, falling back to basic queue")
             buildFallbackQueue()
@@ -123,7 +129,7 @@ class SpotifyQueue(
      * Used when the recommendation engine is unavailable.
      */
     private suspend fun buildFallbackQueue() {
-        val seenIds = mutableSetOf(initialTrack.id)
+        val seenIds = (excludedSpotifyIds + initialTrack.id).toMutableSet()
 
         for (artistId in initialTrack.artists.mapNotNull { it.id }.take(2)) {
             val topTracks = Spotify.artistTopTracks(artistId).getOrNull()
@@ -154,6 +160,7 @@ class SpotifyQueue(
 
     override suspend fun nextPage(): List<MediaItem> = withContext(Dispatchers.IO) {
         ensureRecommendations()
+        if (spotifyCatalogOnly) queuedTracks.removeAll { !isSpotifyCatalogTrack(it) || it.id in excludedSpotifyIds }
 
         if (resolveOffset >= queuedTracks.size) {
             return@withContext emptyList()
@@ -169,9 +176,23 @@ class SpotifyQueue(
         )
 
         coroutineScope {
-            batch.map { track -> async { mapper.resolveToMediaItem(track) } }
+            batch.map { track -> async {
+                if (!spotifyCatalogOnly) mapper.resolveToMediaItem(track) else {
+                    try {
+                        withTimeoutOrNull(8_000L) { mapper.resolveToMediaItem(track) }
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Timber.w(e, "Spotify Discovery: could not match a candidate")
+                        null
+                    }
+                }
+            } }
                 .awaitAll()
                 .filterNotNull()
         }
     }
 }
+
+internal fun isSpotifyCatalogTrack(track: SpotifyTrack): Boolean =
+    !track.isLocal && track.id.length == 22 && track.id.all { it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' }

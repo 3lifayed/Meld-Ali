@@ -182,6 +182,8 @@ import com.metrolist.music.constants.ScrobbleDelayPercentKey
 import com.metrolist.music.constants.ScrobbleDelaySecondsKey
 import com.metrolist.music.constants.ScrobbleMinSongDurationKey
 import com.metrolist.music.constants.ShowLyricsKey
+import com.metrolist.music.constants.DiscoveryIntervalKey
+import com.metrolist.music.constants.ShuffleStyleKey
 import com.metrolist.music.constants.ShuffleModeKey
 import com.metrolist.music.constants.ShufflePlaylistFirstKey
 import com.metrolist.music.constants.StopMusicOnTaskClearKey
@@ -510,6 +512,29 @@ class MusicService :
     private var scrobbleManager: ScrobbleManager? = null
 
     val automixItems = MutableStateFlow<List<MediaItem>>(emptyList())
+    val shuffleStyle = MutableStateFlow(ShuffleStyle.RANDOM)
+    val discoveryRecommendations = MutableStateFlow<Set<String>>(emptySet())
+    val discoveryLoading = MutableStateFlow(false)
+    val discoveryError = MutableStateFlow<Int?>(null)
+    private val discoveryHistory by lazy {
+        DiscoveryHistory(getSharedPreferences("discovery_history", MODE_PRIVATE))
+    }
+    private val recentShuffleTracks = mutableListOf<String>()
+    private val sessionHeardIds = mutableSetOf<String>()
+    private var discoveryJob: Job? = null
+    private var shuffleLoadJob: Job? = null
+    private var queuePageJob: Job? = null
+    private var queueGeneration = 0L
+    private var shuffleLoading = false
+    private var shuffleRequestId = 0L
+    private var queueLoading = false
+    private var lastDiscoverySeed: String? = null
+    private var discoveryRequestId = 0L
+    private var adoptedShuffleMode: Boolean? = null
+    private var discoveryInterval = DEFAULT_DISCOVERY_INTERVAL
+
+    val managesRecommendations: Boolean
+        get() = player.shuffleModeEnabled && shuffleStyle.value != ShuffleStyle.RANDOM
 
     // Tracks the original queue size to distinguish original items from auto-added ones
     private var originalQueueSize: Int = 0
@@ -545,6 +570,9 @@ class MusicService :
 
     // URL cache for stream URLs - class-level so it can be invalidated on errors
     private val songUrlCache = StreamUrlCache()
+    private val containerRecovery by lazy {
+        ContainerRecovery(getSharedPreferences("damaged_saved_audio", MODE_PRIVATE))
+    }
 
     // Tracks mediaIds for which a recoverSong() coroutine is currently in flight.
     //
@@ -678,6 +706,24 @@ class MusicService :
         // never calls dataStore.get() (which does runBlocking internally).
         // This consolidates ~15 main-thread-blocking DataStore reads into 1.
         startupPrefs = runBlocking(Dispatchers.IO) { dataStore.data.first() }
+        discoveryInterval = validDiscoveryInterval(startupPrefs!![DiscoveryIntervalKey] ?: DEFAULT_DISCOVERY_INTERVAL)
+        shuffleStyle.value = runCatching {
+            ShuffleStyle.valueOf(startupPrefs!![ShuffleStyleKey] ?: "RANDOM")
+        }.getOrDefault(ShuffleStyle.RANDOM)
+        scope.launch {
+            database.recentShuffleSongIds().collect { ids ->
+                recentShuffleTracks.clear()
+                recentShuffleTracks.addAll(ids.asReversed())
+            }
+        }
+        runCatching {
+            val file = filesDir.resolve("discovery_recommendations.json")
+            if ((startupPrefs!![PersistentQueueKey] ?: true) && file.exists()) {
+                val ids = org.json.JSONArray(file.readText())
+                discoveryRecommendations.value = (0 until ids.length()).map { ids.getString(it) }.toSet()
+            }
+        }
+
 
         // 3. Connect the processor to the service
         // handled in createExoPlayer
@@ -1316,6 +1362,15 @@ class MusicService :
         scope.launch {
             dataStore.data.map { it[AutoLoadMoreKey] ?: true }.distinctUntilChanged().collect { cachedAutoLoadMore = it }
         }
+        scope.launch {
+            dataStore.data.map { validDiscoveryInterval(it[DiscoveryIntervalKey] ?: DEFAULT_DISCOVERY_INTERVAL) }
+                .distinctUntilChanged().collect { interval ->
+                    if (interval != discoveryInterval) {
+                        discoveryInterval = interval
+                        refreshDiscoveryFrequency()
+                    }
+                }
+        }
         if (startupPrefs!![PersistentQueueKey] ?: true) {
             val queueFile = filesDir.resolve(PERSISTENT_QUEUE_FILE)
             if (queueFile.exists()) {
@@ -1620,6 +1675,8 @@ class MusicService :
         runCatching { filesDir.resolve(PERSISTENT_QUEUE_FILE).delete() }
         runCatching { filesDir.resolve(PERSISTENT_AUTOMIX_FILE).delete() }
         runCatching { filesDir.resolve(PERSISTENT_PLAYER_STATE_FILE).delete() }
+        runCatching { filesDir.resolve("discovery_recommendations.json").delete() }
+        discoveryRecommendations.value = emptySet()
     }
 
     private fun waitOnNetworkError() {
@@ -1922,6 +1979,9 @@ class MusicService :
             return
         }
 
+        resetShuffleSession(clearRecommendations = !restoringQueue)
+        val generation = queueGeneration
+        queueLoading = true
         currentQueue = queue
         queueTitle = null
         val persistShuffleAcrossQueues = dataStore.get(PersistentShuffleAcrossQueuesKey, false)
@@ -1950,11 +2010,18 @@ class MusicService :
                         .filterExplicit(dataStore.get(HideExplicitKey, false))
                         .filterVideoSongs(dataStore.get(HideVideoSongsKey, false))
                 }
-            if (queue.preloadItem != null && player.playbackState == STATE_IDLE) return@launch
+            if (generation != queueGeneration) return@launch
+            if (queue.preloadItem != null && player.playbackState == STATE_IDLE) {
+                queueLoading = false
+                return@launch
+            }
             if (initialStatus.title != null) {
                 queueTitle = initialStatus.title
             }
-            if (initialStatus.items.isEmpty()) return@launch
+            if (initialStatus.items.isEmpty()) {
+                queueLoading = false
+                return@launch
+            }
             originalQueueSize = initialStatus.items.size
             if (queue.preloadItem != null) {
                 player.addMediaItems(
@@ -1978,6 +2045,8 @@ class MusicService :
             }
 
             if (player.shuffleModeEnabled) {
+                applyShuffleOrderKeepingHistory(emptyList(), player.currentMediaItemIndex, player.mediaItemCount)
+                if (restoringQueue) discardLegacyDiscovery()
                 // Fallback when queue doesn't support getFullStatus: load remaining pages then shuffle
                 withContext(Dispatchers.IO) { queue.shuffleRemainingTracks() }
                 while (queue.hasNextPage() && player.mediaItemCount < SHUFFLE_PRELOAD_MAX_ITEMS) {
@@ -1986,8 +2055,9 @@ class MusicService :
                             .filterExplicit(dataStore.get(HideExplicitKey, false))
                             .filterVideoSongs(dataStore.get(HideVideoSongsKey, false))
                     }
+                    if (generation != queueGeneration || !player.shuffleModeEnabled) return@launch
                     if (moreItems.isEmpty()) break
-                    player.addMediaItems(moreItems)
+                    appendShuffleItems(moreItems)
                 }
                 originalQueueSize = player.mediaItemCount
                 val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
@@ -1999,18 +2069,28 @@ class MusicService :
                             .filterExplicit(dataStore.get(HideExplicitKey, false))
                             .filterVideoSongs(dataStore.get(HideVideoSongsKey, false))
                     }
+                    if (generation != queueGeneration) return@launch
                     if (moreItems.isNotEmpty()) {
                         player.addMediaItems(moreItems)
                     }
                 }
             }
+            queueLoading = false
+            if (player.shuffleModeEnabled) {
+                applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, cachedShufflePlaylistFirst)
+            }
+            requestDiscovery()
+        }.invokeOnCompletion {
+            if (generation == queueGeneration) queueLoading = false
         }
     }
 
-    fun adoptQueue(queue: Queue, title: String? = null, initialQueueSize: Int = 0) {
+    fun adoptQueue(queue: Queue, title: String? = null, initialQueueSize: Int = 0, shuffle: Boolean? = null) {
+        resetShuffleSession()
         currentQueue = queue
         queueTitle = title
         originalQueueSize = initialQueueSize
+        adoptedShuffleMode = shuffle ?: player.shuffleModeEnabled
     }
 
     fun startRadioSeamlessly() {
@@ -2109,7 +2189,7 @@ class MusicService :
     }
 
     fun getAutomix(playlistId: String) {
-        if (dataStore.get(SimilarContent, true) &&
+        if (!managesRecommendations && dataStore.get(SimilarContent, true) &&
             !(dataStore.get(DisableLoadMoreWhenRepeatAllKey, false) && player.repeatMode == REPEAT_MODE_ALL)
         ) {
             scope.launch(SilentHandler) {
@@ -2362,10 +2442,20 @@ class MusicService :
         playedIndices: List<Int>,
         currentIndex: Int,
         totalCount: Int,
+        playlistFirst: Boolean = cachedShufflePlaylistFirst,
     ) {
         if (totalCount == 0) return
-
-        player.setShuffleOrder(DefaultShuffleOrder(shuffleOrderKeepingHistory(playedIndices, currentIndex, totalCount), System.currentTimeMillis()))
+        val order = if (shuffleStyle.value == ShuffleStyle.RANDOM) {
+            shuffleOrderKeepingHistory(playedIndices, currentIndex, totalCount, originalQueueSize, playlistFirst)
+        } else {
+            smartShuffleOrder(
+                shuffleTracks(), playedIndices, currentIndex, recentShuffleTracks,
+                if (shuffleStyle.value == ShuffleStyle.DISCOVERY) discoveryRecommendations.value else emptySet(),
+                originalQueueSize, playlistFirst && shuffleStyle.value != ShuffleStyle.DISCOVERY,
+                discoveryInterval = discoveryInterval,
+            )
+        }
+        player.setShuffleOrder(DefaultShuffleOrder(order, System.currentTimeMillis()))
     }
 
     fun toggleLibrary() {
@@ -2746,7 +2836,16 @@ class MusicService :
                 scope.launch(Dispatchers.IO) { markCachedIfFullyDownloaded(previousId) }
             }
         }
+        mediaItem?.mediaId?.let(sessionHeardIds::add)
+        mediaItem?.metadata?.spotifyTrackId?.let { SpotifyMetadataRegistry.rememberIdentity(mediaItem.mediaId, it) }
         lastTransitionedMediaId = mediaItem?.mediaId
+        if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_PLAYLIST_CHANGED) {
+            adoptedShuffleMode?.let { shuffle ->
+                adoptedShuffleMode = null
+                if (shuffle != player.shuffleModeEnabled) player.shuffleModeEnabled = shuffle
+                else if (shuffle) applyShuffleOrderKeepingHistory(emptyList(), player.currentMediaItemIndex, player.mediaItemCount)
+            }
+        }
         initialBufferRecoveryJob?.cancel()
         initialBufferRecoveryJob = null
         initialBufferRecoveryAttemptedMediaId = null
@@ -2814,22 +2913,26 @@ class MusicService :
         }
 
         // Auto load more songs from queue (lazy load: keep QUEUE_PRELOAD_AHEAD_THRESHOLD items ahead)
-        if (dataStore.get(AutoLoadMoreKey, true) &&
+        if (!queueLoading && !shuffleLoading && queuePageJob?.isActive != true && dataStore.get(AutoLoadMoreKey, true) &&
             reason != Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT &&
-            player.mediaItemCount - player.currentMediaItemIndex <= QUEUE_PRELOAD_AHEAD_THRESHOLD &&
+            needsMoreQueueItems() &&
             currentQueue.hasNextPage() &&
             !(cachedDisableLoadMoreWhenRepeatAll && player.repeatMode == REPEAT_MODE_ALL)
         ) {
-            scope.launch(SilentHandler) {
+            val queue = currentQueue
+            val generation = queueGeneration
+            val shuffleRequest = shuffleRequestId
+            queuePageJob = scope.launch(SilentHandler) {
                 val mediaItems =
                     withContext(Dispatchers.IO) {
-                        currentQueue
+                        queue
                             .nextPage()
                             .filterExplicit(cachedHideExplicit)
                             .filterVideoSongs(cachedHideVideoSongs)
                     }
-                if (player.playbackState != STATE_IDLE && mediaItems.isNotEmpty()) {
-                    val playedBefore = if (player.shuffleModeEnabled) playedShuffleIndices(player.currentMediaItemIndex) else emptyList(); player.addMediaItems(mediaItems)
+                if (shuffleRequest == shuffleRequestId && generation == queueGeneration && player.playbackState != STATE_IDLE && mediaItems.isNotEmpty()) {
+                    val playedBefore = if (player.shuffleModeEnabled) playedShuffleIndices(player.currentMediaItemIndex) else emptyList()
+                    player.addMediaItems(mediaItems)
                     if (player.shuffleModeEnabled) {
                         applyShuffleOrderKeepingHistory(playedBefore, player.currentMediaItemIndex, player.mediaItemCount)
                     }
@@ -2837,6 +2940,7 @@ class MusicService :
             }
         }
 
+        requestDiscovery()
         if (cachedPersistentQueue) {
             saveQueueToDisk()
         }
@@ -3051,68 +3155,244 @@ class MusicService :
 
     override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
         updateNotification()
-        if (shuffleModeEnabled) {
-            if (player.mediaItemCount == 0) return
-
-            val queue = currentQueue ?: return
-            val currentPositionMs = player.currentPosition
-            // Prefer full playlist so shuffle includes all tracks (e.g. 227), not just from current onwards.
-            scope.launch(SilentHandler) {
-                val fullStatus = withContext(Dispatchers.IO) {
-                    queue.getFullStatus()
-                        ?.filterExplicit(dataStore.get(HideExplicitKey, false))
-                        ?.filterVideoSongs(dataStore.get(HideVideoSongsKey, false))
-                }
-                if (fullStatus != null && fullStatus.items.isNotEmpty()) {
-                    val currentId = player.currentMetadata?.id
-                    val startIndex = if (currentId != null) {
-                        fullStatus.items.indexOfFirst { it.mediaId == currentId }.takeIf { it >= 0 }
-                            ?: fullStatus.mediaItemIndex
-                    } else {
-                        fullStatus.mediaItemIndex
-                    }.coerceIn(0, fullStatus.items.size - 1)
-                    player.setMediaItems(fullStatus.items, startIndex, currentPositionMs.coerceAtLeast(0L))
-                    player.prepare()
-                    if (player.playbackState != Player.STATE_IDLE) {
-                        player.playWhenReady = true
+        queuePageJob?.cancel()
+        shuffleLoadJob?.cancel()
+        val shuffleRequest = ++shuffleRequestId
+        shuffleLoading = false
+        if (shuffleModeEnabled && !queueLoading && player.mediaItemCount > 0) {
+            val queue = currentQueue
+            val generation = queueGeneration
+            // Preserve history and playback position; expanding a playlist must not replace the player timeline.
+            val initialHistory = (0 until player.currentMediaItemIndex).filter {
+                player.getMediaItemAt(it).mediaId in sessionHeardIds
+            }
+            applyShuffleOrderKeepingHistory(initialHistory, player.currentMediaItemIndex, player.mediaItemCount)
+            if (shuffleStyle.value == ShuffleStyle.DISCOVERY) discardLegacyDiscovery()
+            shuffleLoading = true
+            shuffleLoadJob = scope.launch(SilentHandler) {
+                try {
+                    val fullStatus = withContext(Dispatchers.IO) {
+                        queue.getFullStatus()
+                            ?.filterExplicit(cachedHideExplicit)
+                            ?.filterVideoSongs(cachedHideVideoSongs)
                     }
-                    originalQueueSize = fullStatus.items.size
-                    val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
-                    applyShuffleOrder(startIndex, fullStatus.items.size, shufflePlaylistFirst)
-                    return@launch
-                }
-                if (queue.hasNextPage()) {
-                    withContext(Dispatchers.IO) { queue.shuffleRemainingTracks() }
-                    while (queue.hasNextPage() && player.mediaItemCount < SHUFFLE_PRELOAD_MAX_ITEMS) {
-                        val moreItems = withContext(Dispatchers.IO) {
-                            queue.nextPage()
-                                .filterExplicit(dataStore.get(HideExplicitKey, false))
-                                .filterVideoSongs(dataStore.get(HideVideoSongsKey, false))
+                    if (shuffleRequest != shuffleRequestId || generation != queueGeneration || !player.shuffleModeEnabled) return@launch
+                    if (fullStatus != null && fullStatus.items.isNotEmpty()) {
+                        mergeFullShuffleQueue(fullStatus.items)
+                    } else {
+                        withContext(Dispatchers.IO) { queue.shuffleRemainingTracks() }
+                        while (queue.hasNextPage() && player.mediaItemCount < SHUFFLE_PRELOAD_MAX_ITEMS) {
+                            val items = withContext(Dispatchers.IO) {
+                                queue.nextPage().filterExplicit(cachedHideExplicit).filterVideoSongs(cachedHideVideoSongs)
+                            }
+                            if (shuffleRequest != shuffleRequestId || generation != queueGeneration || !player.shuffleModeEnabled) return@launch
+                            if (items.isEmpty()) break
+                            appendShuffleItems(items)
                         }
-                        if (moreItems.isEmpty()) break
-                        player.addMediaItems(moreItems)
                     }
                     originalQueueSize = player.mediaItemCount
-                    val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
-                    applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, shufflePlaylistFirst)
-                } else {
-                    val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
-                    applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, shufflePlaylistFirst)
+                    applyShuffleOrderKeepingHistory(playedShuffleIndices(player.currentMediaItemIndex), player.currentMediaItemIndex, player.mediaItemCount)
+                } finally {
+                    if (shuffleRequest == shuffleRequestId && generation == queueGeneration) shuffleLoading = false
                 }
+                requestDiscovery()
             }
+        } else if (!shuffleModeEnabled) {
+            cancelDiscovery()
+            removeUpcomingDiscovery()
         }
 
         if (dataStore.get(RememberShuffleAndRepeatKey, true)) {
-            scope.launch {
-                safeDataStoreEdit { settings ->
-                    settings[ShuffleModeKey] = shuffleModeEnabled
+            scope.launch { safeDataStoreEdit { it[ShuffleModeKey] = shuffleModeEnabled } }
+        }
+        if (cachedPersistentQueue) saveQueueToDisk()
+    }
+
+    fun selectShuffleStyle(style: ShuffleStyle?) {
+        if (style == null) {
+            player.shuffleModeEnabled = false
+            return
+        }
+        cancelDiscovery()
+        if (style != ShuffleStyle.DISCOVERY) removeUpcomingDiscovery()
+        shuffleStyle.value = style
+        scope.launch { safeDataStoreEdit { it[ShuffleStyleKey] = style.name } }
+        if (player.shuffleModeEnabled) {
+            if (style == ShuffleStyle.DISCOVERY) discardLegacyDiscovery()
+            applyShuffleOrderKeepingHistory(playedShuffleIndices(player.currentMediaItemIndex), player.currentMediaItemIndex, player.mediaItemCount)
+            requestDiscovery()
+        } else {
+            player.shuffleModeEnabled = true
+        }
+        updateNotification()
+        if (cachedPersistentQueue) saveQueueToDisk()
+    }
+
+    private fun mergeFullShuffleQueue(items: List<MediaItem>) {
+        val heard = player.mergeFullQueueKeepingHistory(items, playedShuffleIndices(player.currentMediaItemIndex))
+        applyShuffleOrderKeepingHistory(heard, player.currentMediaItemIndex, player.mediaItemCount)
+    }
+
+    private fun appendShuffleItems(items: List<MediaItem>) {
+        if (items.isEmpty()) return
+        val played = playedShuffleIndices(player.currentMediaItemIndex)
+        player.addMediaItems(items)
+        applyShuffleOrderKeepingHistory(played, player.currentMediaItemIndex, player.mediaItemCount)
+    }
+
+    private fun shuffleTracks(): List<ShuffleTrack> = player.mediaItems.map { item ->
+        val artists = item.metadata?.artists.orEmpty()
+            .map { it.name.trim().lowercase(java.util.Locale.ROOT) }
+            .filter { it.isNotEmpty() }.toSet()
+        ShuffleTrack(item.mediaId, artists)
+    }
+
+    private fun cancelDiscovery() {
+        discoveryRequestId++
+        discoveryJob?.cancel()
+        discoveryJob = null
+        discoveryLoading.value = false
+        discoveryError.value = null
+        lastDiscoverySeed = null
+    }
+
+    private fun resetShuffleSession(clearRecommendations: Boolean = true) {
+        queueGeneration++
+        queueLoading = false
+        adoptedShuffleMode = null
+        sessionHeardIds.clear()
+        queuePageJob?.cancel()
+        cancelDiscovery()
+        shuffleLoadJob?.cancel()
+        shuffleRequestId++
+        shuffleLoading = false
+        if (clearRecommendations) discoveryRecommendations.value = emptySet()
+    }
+
+    private fun discardLegacyDiscovery() {
+        if (player.mediaItems.any { it.mediaId in discoveryRecommendations.value && it.metadata?.spotifyTrackId == null }) {
+            removeUpcomingDiscovery()
+        }
+    }
+
+    private fun removeUpcomingDiscovery(): List<MediaItem> {
+        if (player.mediaItemCount == 0) return emptyList()
+        val keep = playedShuffleIndices(player.currentMediaItemIndex).toSet() + player.currentMediaItemIndex
+        val remove = player.mediaItems.indices.filter {
+            it !in keep && player.getMediaItemAt(it).mediaId in discoveryRecommendations.value
+        }
+        val removed = remove.map(player::getMediaItemAt)
+        remove.asReversed().forEach(player::removeMediaItem)
+        discoveryRecommendations.value = discoveryRecommendations.value.intersect(player.mediaItems.map { it.mediaId }.toSet())
+        return removed
+    }
+
+    private fun refreshDiscoveryFrequency() {
+        if (!playerInitialized.value || !player.shuffleModeEnabled || shuffleStyle.value != ShuffleStyle.DISCOVERY) return
+        cancelDiscovery()
+        val reusable = removeUpcomingDiscovery().take(pendingDiscoverySlots())
+        discoveryRecommendations.value = discoveryRecommendations.value + reusable.map { it.mediaId }
+        appendShuffleItems(reusable)
+        applyShuffleOrderKeepingHistory(playedShuffleIndices(player.currentMediaItemIndex), player.currentMediaItemIndex, player.mediaItemCount)
+        requestDiscovery()
+        if (cachedPersistentQueue) saveQueueToDisk()
+    }
+
+    fun retryDiscovery() {
+        lastDiscoverySeed = null
+        requestDiscovery()
+    }
+
+    private fun requestDiscovery() {
+        if (queueLoading || shuffleLoading || !player.shuffleModeEnabled || shuffleStyle.value != ShuffleStyle.DISCOVERY ||
+            discoveryJob?.isActive == true ||
+            (cachedDisableLoadMoreWhenRepeatAll && player.repeatMode == REPEAT_MODE_ALL)
+        ) return
+        val seedMetadata = player.currentMetadata?.takeUnless { it.isEpisode } ?: return
+        val seed = seedMetadata.id
+        if (seed in discoveryRecommendations.value) return
+        val generation = queueGeneration
+        val pending = pendingDiscoverySlots()
+        if (pending <= 0 || lastDiscoverySeed == seed) return
+        val requestId = ++discoveryRequestId
+        lastDiscoverySeed = seed
+        discoveryLoading.value = true
+        discoveryError.value = null
+        discoveryHistory.record(player.mediaItems.filter { it.mediaId in discoveryRecommendations.value })
+        val excludedYoutubeIds = player.mediaItems.map { it.mediaId }.toSet() + recentShuffleTracks + discoveryHistory.youtubeIds
+        val excludedSpotifyIds = player.mediaItems.mapNotNull { it.metadata?.spotifyTrackId ?: SpotifyMetadataRegistry.getSpotifyId(it.mediaId) }.toSet() + discoveryHistory.spotifyIds
+        discoveryJob = scope.launch {
+            var failureReason = R.string.shuffle_discovery_sign_in
+            try {
+                val candidates = withContext(Dispatchers.IO) {
+                    withTimeout(60_000) {
+                        check(com.metrolist.spotify.Spotify.isAuthenticated()) { "Sign in to Spotify for Discovery" }
+                        failureReason = R.string.shuffle_discovery_seed_missing
+                        val mapper = SpotifyYouTubeMapper(database)
+                        seedMetadata.spotifyTrackId?.let { SpotifyMetadataRegistry.rememberIdentity(seed, it) }
+                        val spotifySeed = mapper.resolveToSpotifyTrack(
+                            seed, seedMetadata.title, seedMetadata.artists.firstOrNull()?.name.orEmpty(), seedMetadata.duration,
+                        ) ?: error("No Spotify match for this song")
+                        failureReason = R.string.shuffle_discovery_fetch_failed
+                        val spotifyQueue = com.metrolist.music.playback.queues.SpotifyQueue(
+                            spotifySeed, mapper, this@MusicService, database, spotifyCatalogOnly = true,
+                            excludedSpotifyIds = excludedSpotifyIds,
+                        )
+                        collectDiscoveryRecommendations(
+                            spotifyQueue, excludedYoutubeIds, pending,
+                            cachedHideExplicit, cachedHideVideoSongs,
+                        )
+                    }
                 }
+                if (requestId != discoveryRequestId || generation != queueGeneration || !player.shuffleModeEnabled || shuffleStyle.value != ShuffleStyle.DISCOVERY) return@launch
+                val existing = player.mediaItems.map { it.mediaId }.toSet()
+                val additions = candidates.distinctBy { it.mediaId }
+                    .filter { it.mediaId !in existing && it.mediaId !in recentShuffleTracks && it.metadata?.isEpisode != true }
+                    .take(pendingDiscoverySlots())
+                if (additions.isEmpty()) {
+                    discoveryError.value = R.string.shuffle_discovery_no_new
+                    return@launch
+                }
+                discoveryHistory.record(additions)
+                val played = playedShuffleIndices(player.currentMediaItemIndex)
+                discoveryRecommendations.value = discoveryRecommendations.value + additions.map { it.mediaId }
+                player.addMediaItems(additions)
+                applyShuffleOrderKeepingHistory(played, player.currentMediaItemIndex, player.mediaItemCount)
+                if (cachedPersistentQueue) saveQueueToDisk()
+            } catch (e: TimeoutCancellationException) {
+                discoveryError.value = R.string.shuffle_discovery_timeout
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Timber.tag(TAG).w(e, "Discovery unavailable; keeping the original queue")
+                discoveryError.value = failureReason
+            } finally {
+                if (requestId == discoveryRequestId) discoveryLoading.value = false
             }
         }
+    }
 
-        if (cachedPersistentQueue) {
-            saveQueueToDisk()
+    private fun needsMoreQueueItems(): Boolean {
+        val timeline = player.currentTimeline
+        if (timeline.isEmpty) return false
+        var index = player.currentMediaItemIndex
+        repeat(QUEUE_PRELOAD_AHEAD_THRESHOLD) {
+            index = timeline.getNextWindowIndex(index, Player.REPEAT_MODE_OFF, player.shuffleModeEnabled)
+            if (index == C.INDEX_UNSET) return true
         }
+        return false
+    }
+
+    private fun pendingDiscoverySlots(): Int {
+        if (player.mediaItemCount == 0) return 0
+        val tracks = shuffleTracks()
+        val prefix = playedShuffleIndices(player.currentMediaItemIndex) + player.currentMediaItemIndex
+        val played = prefix.toSet()
+        val remaining = tracks.indices.filter { it !in played }
+        val ids = discoveryRecommendations.value
+        val originals = remaining.count { tracks[it].id !in ids }
+        val pending = remaining.size - originals
+        return (discoverySlots(originalsSinceRecommendation(prefix, tracks, ids), originals, discoveryInterval) - pending).coerceAtLeast(0)
     }
 
     override fun onRepeatModeChanged(repeatMode: Int) {
@@ -3137,40 +3417,7 @@ class MusicService :
         totalCount: Int,
         shufflePlaylistFirst: Boolean,
     ) {
-        if (totalCount == 0) return
-
-        if (shufflePlaylistFirst && originalQueueSize > 0 && originalQueueSize < totalCount) {
-            // Shuffle original items and added items separately
-            val originalIndices = (0 until originalQueueSize).filter { it != currentIndex }.toMutableList()
-            val addedIndices = (originalQueueSize until totalCount).filter { it != currentIndex }.toMutableList()
-
-            originalIndices.shuffle()
-            addedIndices.shuffle()
-
-            val shuffledIndices = IntArray(totalCount)
-            var pos = 0
-            shuffledIndices[pos++] = currentIndex
-
-            if (currentIndex < originalQueueSize) {
-                originalIndices.forEach { shuffledIndices[pos++] = it }
-                addedIndices.forEach { shuffledIndices[pos++] = it }
-            } else {
-                (0 until originalQueueSize).shuffled().forEach { shuffledIndices[pos++] = it }
-                addedIndices.forEach { shuffledIndices[pos++] = it }
-            }
-            player.setShuffleOrder(DefaultShuffleOrder(shuffledIndices, System.currentTimeMillis()))
-        } else {
-            val shuffledIndices = IntArray(totalCount) { it }
-            shuffledIndices.shuffle()
-            // Ensure current item is first in the shuffle order
-            val currentItemIndexInShuffled = shuffledIndices.indexOf(currentIndex)
-            if (currentItemIndexInShuffled != -1) { // Should always be true if totalCount > 0
-                val temp = shuffledIndices[0]
-                shuffledIndices[0] = shuffledIndices[currentItemIndexInShuffled]
-                shuffledIndices[currentItemIndexInShuffled] = temp
-            }
-            player.setShuffleOrder(DefaultShuffleOrder(shuffledIndices, System.currentTimeMillis()))
-        }
+        applyShuffleOrderKeepingHistory(playedShuffleIndices(currentIndex), currentIndex, totalCount, shufflePlaylistFirst)
     }
 
     override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
@@ -3290,46 +3537,6 @@ class MusicService :
         var cause: Throwable? = error.cause
         while (cause != null) {
             if (cause is android.media.MediaCodec.CodecException) return true
-            cause = cause.cause
-        }
-        return false
-    }
-
-    /**
-     * Detects a corrupt-container source error that no amount of retrying will fix
-     * (e.g. MatroskaExtractor's recurring `ArrayIndexOutOfBoundsException` on a
-     * partial WebM stream). The only sensible response is to skip the track —
-     * see github.com/FrancescoGrazioso/Meld/issues/94. Suppresses the crash
-     * report since this is an upstream Media3 bug, not our own.
-     */
-    private fun isMalformedContainerError(error: PlaybackException): Boolean {
-        var cause: Throwable? = error
-        while (cause != null) {
-            val stack = cause.stackTrace
-            for (frame in stack) {
-                val cls = frame.className
-                val inExtractor = cls.contains("androidx.media3.extractor.mkv") ||
-                    cls.contains("androidx.media3.extractor.mp4") ||
-                    cls.contains("androidx.media3.extractor.ogg") ||
-                    cls.contains("androidx.media3.extractor.DefaultExtractorInput")
-                if (inExtractor) {
-                    if (cause is ArrayIndexOutOfBoundsException ||
-                        cause is IndexOutOfBoundsException ||
-                        cause is NumberFormatException ||
-                        cause is java.io.EOFException ||
-                        cause is IllegalStateException
-                    ) {
-                        return true
-                    }
-                    // Media3 ParserException for malformed EBML/MKV headers (issue #142:
-                    // "Invalid integer size: 78" from DefaultEbmlReader on a truncated
-                    // stream). Match by class name to avoid an extra direct dependency
-                    // on androidx.media3.common from here.
-                    if (cause.javaClass.name == "androidx.media3.common.ParserException") {
-                        return true
-                    }
-                }
-            }
             cause = cause.cause
         }
         return false
@@ -3481,7 +3688,28 @@ class MusicService :
             performAggressiveCacheClear(mediaId)
         }
 
+        val fromSavedAudio = currentStreamClient.value?.startsWith("Saved audio") == true
         when {
+            mediaId != null && !mediaId.startsWith("local:") &&
+                shouldRecoverContainerFailure(error, fromSavedAudio) -> {
+                if (fromSavedAudio) {
+                    containerRecovery.quarantineSavedCopy(mediaId, downloadUtil.downloads.value[mediaId]?.updateTimeMs)
+                }
+                val attempt = containerRecovery.nextAttempt(mediaId)
+                if (attempt == null) {
+                    handleFinalFailure()
+                } else {
+                    refreshStreamAndRetry(
+                        mediaId = mediaId,
+                        failedStreamClient = if (attempt == 1) null else failedStreamClient,
+                        refreshCipherConfig = false,
+                        retryReason = "audio container failure",
+                        resetMediaSource = true,
+                    )
+                }
+                return
+            }
+
             isAudioRendererError(error) -> {
                 Timber.tag(TAG).d("AudioTrack error detected (${error.errorCode}), performing safe recovery")
                 handleAudioRendererError(mediaId)
@@ -3744,6 +3972,7 @@ class MusicService :
         failedStreamClient: String?,
         refreshCipherConfig: Boolean,
         retryReason: String,
+        resetMediaSource: Boolean = false,
     ) {
         if (hasExceededRetryLimit(mediaId)) {
             Timber.tag(TAG).w("Song reached the retry limit during $retryReason")
@@ -3787,6 +4016,7 @@ class MusicService :
                 }
 
                 retryJob = null
+                if (resetMediaSource) player.stop()
                 player.seekTo(retryIndex, retryPosition)
                 player.prepare()
 
@@ -3954,7 +4184,8 @@ class MusicService :
             val mediaId = mediaItem.mediaMetadata.extras?.getString("mediaId")
                 ?: mediaItem.mediaId
             val title = mediaItem.mediaMetadata.title?.toString() ?: "unknown"
-            if (mediaId.startsWith("local:")) {
+            containerRecovery.refreshSavedCopy(mediaId, downloadUtil.downloads.value[mediaId]?.updateTimeMs)
+            if (mediaId.startsWith("local:") || containerRecovery.isActive(mediaId)) {
                 Timber.tag(PRECACHE_TAG).d("[PRECACHE] Skip local track [$i]: $title ($mediaId)")
                 continue
             }
@@ -4481,6 +4712,8 @@ class MusicService :
 
 
             val shouldBypassCache = bypassCacheForQualityChange.contains(mediaId)
+            containerRecovery.refreshSavedCopy(mediaId, downloadUtil.downloads.value[mediaId]?.updateTimeMs)
+            val recoveringContainer = containerRecovery.isActive(mediaId)
 
             // Qobuz lossless attempt: when toggle is on, try Qobuz for every track.
             // Uses Spotify metadata (with ISRC) when available — registered by
@@ -4488,7 +4721,7 @@ class MusicService :
             // to DB title/artist/album for YT-native tracks. Silently falls through
             // to the YouTube path on any failure.
             val qobuzEnabled = dataStore.get(EnableQobuzKey, false)
-            if (qobuzEnabled) {
+            if (qobuzEnabled && !recoveringContainer) {
                 val qobuzQualityEnum = dataStore.get(QobuzAudioQualityKey)
                     .toEnum(QobuzAudioQuality.CD_QUALITY)
                 val qualityCode = QobuzAudioProvider.qualityCodeFor(qobuzQualityEnum)
@@ -4694,12 +4927,14 @@ class MusicService :
                         else -> CHUNK_LENGTH // contentLength unknown yet — fall back to old probe size
                     }
 
-                if (downloadCache.isCached(mediaId, dataSpec.position, requiredLength)) {
+                if (!recoveringContainer && downloadCache.isCached(mediaId, dataSpec.position, requiredLength)) {
+                    currentStreamClient.value = "Saved audio (itag ${storedFormat?.itag ?: "unknown"})"
                     recoverSongDeduped(mediaId)
                     return@Factory dataSpec
                 }
 
-                if (usePlayerCache && playerCache.isCached(mediaId, dataSpec.position, requiredLength)) {
+                if (!recoveringContainer && usePlayerCache && playerCache.isCached(mediaId, dataSpec.position, requiredLength)) {
+                    currentStreamClient.value = "Cached audio (itag ${storedFormat?.itag ?: "unknown"})"
                     recoverSongDeduped(mediaId)
                     return@Factory dataSpec
                 }
@@ -4722,6 +4957,7 @@ class MusicService :
                         mediaId,
                         audioQuality = audioQuality,
                         connectivityManager = connectivityManager,
+                        preferWebm = recoveringContainer,
                         contentHints = ContentHints(
                             isExplicit = song?.explicit,
                             isUploaded = song?.isUploaded,
@@ -4823,6 +5059,7 @@ class MusicService :
                     requireBoundedRange = nonNullPlayback.requireBoundedRange,
                     rangeChunkSizeBytes = nonNullPlayback.rangeChunkSizeBytes,
                     useRangeChunks = nonNullPlayback.useRangeChunks,
+                    cacheKey = containerRecovery.cacheKey(mediaId, format.itag),
                     expectedGeneration = cacheGeneration,
                 )
 
@@ -4838,6 +5075,7 @@ class MusicService :
                         requireBoundedRange = nonNullPlayback.requireBoundedRange,
                         rangeChunkSizeBytes = nonNullPlayback.rangeChunkSizeBytes,
                         useRangeChunks = nonNullPlayback.useRangeChunks,
+                        cacheKey = containerRecovery.cacheKey(mediaId, format.itag),
                     ),
                 )
             }
@@ -4886,11 +5124,14 @@ class MusicService :
             out[coreRendererIndex] =
                 object : MediaCodecAudioRenderer(
                     context,
+                    codecAdapterFactory,
                     mediaCodecSelector,
                     enableDecoderFallback,
                     eventHandler,
                     eventListener,
                     audioSink,
+                    // Avoid platform loudness-controller failures during codec release; our processor normalizes audio.
+                    null,
                 ) {
                     override fun getCodecOperatingRateV23(
                         targetPlaybackSpeed: Float,
@@ -4969,6 +5210,7 @@ class MusicService :
     }
 
     private data class QueueSnapshot(
+        val recommendationIds: Set<String>,
         val queue: PersistQueue,
         val automix: PersistQueue,
         val state: PersistPlayerState,
@@ -4981,6 +5223,7 @@ class MusicService :
         }
         return try {
             QueueSnapshot(
+                recommendationIds = discoveryRecommendations.value.intersect(player.mediaItems.map { it.mediaId }.toSet()),
                 queue = currentQueue.toPersistQueue(
                     title = queueTitle,
                     items = player.mediaItems.mapNotNull { it.metadata },
@@ -5011,6 +5254,9 @@ class MusicService :
     }
 
     private fun writeQueueSnapshot(snapshot: QueueSnapshot) {
+        runCatching {
+            filesDir.resolve("discovery_recommendations.json").writeText(org.json.JSONArray(snapshot.recommendationIds).toString())
+        }.onFailure { Timber.tag(TAG).w(it, "Failed to save discovery markers") }
         runCatching {
             filesDir.resolve(PERSISTENT_QUEUE_FILE).outputStream().use { fos ->
                 ObjectOutputStream(fos).use { oos -> oos.writeObject(snapshot.queue) }
@@ -5139,6 +5385,9 @@ class MusicService :
         }
 
     override fun onDestroy() {
+        queuePageJob?.cancel()
+        discoveryJob?.cancel()
+        shuffleLoadJob?.cancel()
         isRunning = false
         preCacheJob?.cancel()
 
@@ -5914,6 +6163,16 @@ class MusicService :
         }
 
         secPlayer.setMediaItems(items)
+        if (shuffleModeEnabled) {
+            val timeline = player.currentTimeline
+            val order = mutableListOf<Int>()
+            var index = timeline.getFirstWindowIndex(true)
+            while (index != C.INDEX_UNSET && order.size < itemCount) {
+                order.add(index)
+                index = timeline.getNextWindowIndex(index, Player.REPEAT_MODE_OFF, true)
+            }
+            secPlayer.setShuffleOrder(DefaultShuffleOrder(order.toIntArray(), System.currentTimeMillis()))
+        }
         secPlayer.seekTo(targetIndex, 0)
         secPlayer.volume = 0f
 
@@ -5935,11 +6194,6 @@ class MusicService :
         }
 
         performCrossfadeSwap()
-
-        if (shuffleModeEnabled) {
-            val shufflePlaylistFirst = dataStore.get(ShufflePlaylistFirstKey, false)
-            applyShuffleOrder(player.currentMediaItemIndex, player.mediaItemCount, shufflePlaylistFirst)
-        }
     }
 
     private fun performCrossfadeSwap() {

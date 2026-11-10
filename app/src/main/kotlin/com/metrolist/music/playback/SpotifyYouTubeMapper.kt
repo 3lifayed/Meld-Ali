@@ -28,6 +28,9 @@ import timber.log.Timber
  */
 class SpotifyYouTubeMapper(
     private val database: MusicDatabase,
+    private val searchSpotify: suspend (String) -> List<SpotifyTrack> = { query ->
+        Spotify.search(query, types = listOf("track"), limit = 20).getOrNull()?.tracks?.items.orEmpty()
+    },
 ) {
 
     private data class CachedMatch(
@@ -211,12 +214,9 @@ class SpotifyYouTubeMapper(
 
         return MediaMetadata(
             id = youtubeId,
-            title = ytTitle.ifEmpty { spotifyTrack.name },
-            artists = if (ytArtist.isNotEmpty()) {
-                listOf(MediaMetadata.Artist(id = null, name = ytArtist))
-            } else {
-                spotifyTrack.artists.map { MediaMetadata.Artist(id = null, name = it.name) }
-            },
+            title = spotifyTrack.name.ifEmpty { ytTitle },
+            artists = spotifyTrack.artists.map { MediaMetadata.Artist(id = null, name = it.name) }
+                .ifEmpty { listOf(MediaMetadata.Artist(id = null, name = ytArtist)) },
             duration = spotifyTrack.durationMs / 1000,
             thumbnailUrl = thumbnail,
             album = spotifyTrack.album?.let {
@@ -224,6 +224,7 @@ class SpotifyYouTubeMapper(
             },
             explicit = spotifyTrack.explicit,
             isrc = spotifyTrack.isrc,
+            spotifyTrackId = spotifyTrack.id,
         )
     }
 
@@ -275,16 +276,25 @@ class SpotifyYouTubeMapper(
         artist: String,
         durationSec: Int = -1,
     ): String? = withContext(Dispatchers.IO) {
-        database.getSpotifyMatchByYouTubeId(youtubeId)?.let { cached ->
-            Timber.d("Reverse lookup cache hit: $youtubeId -> spotify:track:${cached.spotifyId}")
-            return@withContext "spotify:track:${cached.spotifyId}"
-        }
+        val knownId = SpotifyMetadataRegistry.getSpotifyId(youtubeId)
+            ?: database.getSpotifyMatchByYouTubeId(youtubeId)?.spotifyId
+        if (!knownId.isNullOrBlank()) return@withContext "spotify:track:$knownId"
+        resolveToSpotifyTrack(youtubeId, title, artist, durationSec)?.id?.let { "spotify:track:$it" }
+    }
 
+    suspend fun resolveToSpotifyTrack(
+        youtubeId: String,
+        title: String,
+        artist: String,
+        durationSec: Int = -1,
+    ): SpotifyTrack? = withContext(Dispatchers.IO) {
+        SpotifyMetadataRegistry.get(youtubeId)?.let { return@withContext it }
+        val knownId = SpotifyMetadataRegistry.getSpotifyId(youtubeId)
+            ?: database.getSpotifyMatchByYouTubeId(youtubeId)?.spotifyId
         val query = if (artist.isBlank()) title else "$artist $title"
         Timber.d("Reverse lookup: searching Spotify for '$query'")
 
-        val results = Spotify.search(query, types = listOf("track"), limit = 5)
-            .getOrNull()?.tracks?.items
+        val results = searchSpotify(query).filter { it.id.isNotBlank() && !it.isLocal && (knownId == null || it.id == knownId) }
         if (results.isNullOrEmpty()) {
             Timber.w("Reverse lookup: no Spotify results for '$query'")
             return@withContext null
@@ -326,7 +336,8 @@ class SpotifyYouTubeMapper(
                         matchScore = score,
                     ),
                 )
-                return@withContext uri
+                SpotifyMetadataRegistry.register(youtubeId, best)
+                return@withContext best
             }
         }
 

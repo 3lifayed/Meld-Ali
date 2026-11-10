@@ -80,6 +80,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
+import com.metrolist.music.playback.ShuffleStyle
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -226,6 +229,26 @@ fun Queue(
 
     val coroutineScope = rememberCoroutineScope()
     var showSleepTimerDialog by remember { mutableStateOf(false) }
+    var showShuffleDialog by remember { mutableStateOf(false) }
+    val selectedShuffleStyle by playerConnection.service.shuffleStyle.collectAsStateWithLifecycle()
+    val discoveryIds by playerConnection.service.discoveryRecommendations.collectAsStateWithLifecycle()
+    val discoveryLoading by playerConnection.service.discoveryLoading.collectAsStateWithLifecycle()
+    val discoveryError by playerConnection.service.discoveryError.collectAsStateWithLifecycle()
+    val shuffleEnabled by playerConnection.shuffleModeEnabled.collectAsStateWithLifecycle()
+    val shuffleDescription = stringResource(R.string.shuffle_mode_title) + ": " +
+        if (shuffleEnabled) shuffleStyleLabel(selectedShuffleStyle) else stringResource(R.string.shuffle_disabled)
+    if (showShuffleDialog && !isListenTogetherGuest) {
+        ShuffleModeDialog(
+            enabled = shuffleEnabled,
+            style = selectedShuffleStyle,
+            loading = discoveryLoading,
+            error = discoveryError,
+            onSelect = playerConnection.service::selectShuffleStyle,
+            onRetry = playerConnection.service::retryDiscovery,
+            onDismiss = { showShuffleDialog = false },
+        )
+    }
+
     val sleepTimerDefault by rememberPreference(SleepTimerDefaultKey, 30f)
     var sleepTimerValue by remember { mutableFloatStateOf(sleepTimerDefault) }
     val isAtDefault by remember {
@@ -334,12 +357,13 @@ fun Queue(
                     PlayerQueueButton(
                         icon = R.drawable.shuffle,
                         onClick = {
-                            playerConnection.player.shuffleModeEnabled = !shuffleModeEnabled
+                            showShuffleDialog = true
                         },
                         isActive = shuffleModeEnabled,
                         enabled = !isListenTogetherGuest,
+                        text = if (shuffleModeEnabled && selectedShuffleStyle != ShuffleStyle.RANDOM) shuffleStyleLabel(selectedShuffleStyle) else null,
                         shape = middleShape,
-                        modifier = Modifier.size(buttonSize),
+                        modifier = Modifier.size(buttonSize).semantics { contentDescription = shuffleDescription },
                         textButtonColor = textButtonColor,
                         iconButtonColor = iconButtonColor,
                         iconSize = iconSize,
@@ -839,6 +863,13 @@ fun Queue(
                                     isActive = isActive,
                                     isPlaying = isPlaying && isActive,
                                     trailingContent = {
+                                        if (window.mediaItem.mediaId in discoveryIds) {
+                                            Text(
+                                                text = "✦",
+                                                modifier = Modifier.semantics { contentDescription = context.getString(R.string.shuffle_discovery_recommendation) },
+                                                color = MaterialTheme.colorScheme.primary,
+                                            )
+                                        }
                                         if (inSelectMode) {
                                             Checkbox(
                                                 checked = window.mediaItem.mediaId in selection,
@@ -1204,23 +1235,13 @@ fun Queue(
             IconButton(
                 enabled = !isListenTogetherGuest,
                 modifier = Modifier.align(Alignment.CenterStart),
-                onClick = {
-                    coroutineScope
-                        .launch {
-                            lazyListState.animateScrollToItem(
-                                if (playerConnection.player.shuffleModeEnabled) playerConnection.player.currentMediaItemIndex else 0,
-                            )
-                        }.invokeOnCompletion {
-                            playerConnection.player.shuffleModeEnabled =
-                                !playerConnection.player.shuffleModeEnabled
-                        }
-                },
+                onClick = { showShuffleDialog = true },
             ) {
                 val baseAlpha = if (shuffleModeEnabled) 1f else 0.5f
                 val finalAlpha = if (!isListenTogetherGuest) baseAlpha else 0.3f
                 Icon(
                     painter = painterResource(R.drawable.shuffle),
-                    contentDescription = null,
+                    contentDescription = shuffleDescription,
                     modifier = Modifier.alpha(finalAlpha),
                 )
             }
