@@ -2453,6 +2453,7 @@ class MusicService :
                 if (shuffleStyle.value == ShuffleStyle.DISCOVERY) discoveryRecommendations.value else emptySet(),
                 originalQueueSize, playlistFirst && shuffleStyle.value != ShuffleStyle.DISCOVERY,
                 discoveryInterval = discoveryInterval,
+                style = shuffleStyle.value,
             )
         }
         player.setShuffleOrder(DefaultShuffleOrder(order, System.currentTimeMillis()))

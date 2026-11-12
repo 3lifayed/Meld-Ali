@@ -21,6 +21,7 @@ internal fun smartShuffleOrder(
     playlistFirst: Boolean = false,
     random: Random = Random.Default,
     discoveryInterval: Int = DEFAULT_DISCOVERY_INTERVAL,
+    style: ShuffleStyle = ShuffleStyle.BETTER,
 ): IntArray {
     if (tracks.isEmpty()) return intArrayOf()
     require(currentIndex in tracks.indices)
@@ -42,9 +43,14 @@ internal fun smartShuffleOrder(
         var bestScore = Int.MAX_VALUE
         for (index in remaining) {
             val track = tracks[index]
+            // In Discovery, keep the preference for unheard tracks without sorting
+            // recently heard tracks into the same history order every session.
+            val recentPenalty = recent[track.id]?.let { rank ->
+                if (style == ShuffleStyle.DISCOVERY) 100 else 100 + rank * 2
+            } ?: 0
             val score = (if (playlistFirst && index >= originalQueueSize) 10000 else 0) +
                 (if (track.id in lastIds) 1000 else 0) +
-                (recent[track.id]?.let { 100 + it * 2 } ?: 0) +
+                recentPenalty +
                 track.artists.count { it in lastArtists } * 10
             if (score < bestScore) {
                 next = index

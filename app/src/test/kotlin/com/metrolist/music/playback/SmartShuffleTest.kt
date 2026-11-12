@@ -40,6 +40,23 @@ class SmartShuffleTest {
         }
     }
 
+    @Test fun discoveryVariesTheOrderWhenThePlaylistIsAlreadyInListeningHistory() {
+        val tracks = (0..7).map { track("song$it") }
+        val recent = tracks.map { it.id }
+        val orders = (0..19).map { seed ->
+            smartShuffleOrder(
+                tracks, emptyList(), 0, recent,
+                random = Random(seed), style = ShuffleStyle.DISCOVERY,
+            ).toList()
+        }
+
+        assertTrue(orders.toSet().size > 1)
+        orders.forEach { order ->
+            assertEquals(0, order.first())
+            assertEquals(tracks.indices.toSet(), order.toSet())
+        }
+    }
+
     @Test fun discoveryInterleavesAfterThreeOriginalsWithoutChangingPlayedHistory() {
         val tracks = (0..8).map { track("original$it") } + (0..2).map { track("recommended$it") }
         val ids = setOf("recommended0", "recommended1", "recommended2")
